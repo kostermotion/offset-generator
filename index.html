@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offset Video Generator</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/dist/umd/index.js"></script>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            max-width: 500px; 
+            margin: 40px auto; 
+            padding: 20px; 
+            background: #232323; 
+            color: #ececec; 
+            border-radius: 8px;
+        }
+        label { display: block; margin-top: 15px; font-size: 14px; color: #aaa; }
+        input, select, button { 
+            display: block; width: 100%; margin-top: 5px; padding: 12px; 
+            box-sizing: border-box; background: #333; color: white; 
+            border: 1px solid #444; border-radius: 4px;
+        }
+        button { background: #0066cc; border: none; cursor: pointer; font-weight: bold; margin-top: 25px; }
+        button:hover { background: #0077ee; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        #status { margin-top: 20px; font-size: 14px; color: #ffcc00; text-align: center; font-weight: bold;}
+        #downloadLink {
+            display: block; margin-top: 15px; padding: 12px; background: #28a745; 
+            color: white; text-align: center; text-decoration: none; border-radius: 4px; font-weight: bold;
+        }
+        /* Окно логов, чтобы видеть, что происходит */
+        #log {
+            background: #111; padding: 10px; font-size: 11px; 
+            color: #0f0; margin-top: 15px; border-radius: 4px;
+            height: 120px; overflow-y: auto; font-family: monospace; border: 1px solid #444;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Offset Video Generator</h2>
+    <p style="font-size: 13px; color: #888;">Creates a 10 Mbps looping video for LED pillars.</p>
+
+    <label>Source Image (seamless recommended):</label>
+    <input type="file" id="imageInput" accept="image/*">
+
+    <label>Scroll Direction:</label>
+    <select id="direction">
+        <option value="horizontal">Horizontal</option>
+        <option value="vertical">Vertical</option>
+    </select>
+
+    <label>Duration of 1 cycle (seconds):</label>
+    <input type="number" id="duration" value="5" min="1" max="60">
+
+    <button id="renderBtn" disabled>Downloading engine (30MB)...</button>
+
+    <div id="status"></div>
+    
+    <label>System Logs:</label>
+    <div id="log">Initializing...<br></div>
+    
+    <a id="downloadLink" style="display: none;">Download Video</a>
+
+    <script>
+        const logDiv = document.getElementById('log');
+        function addLog(text) {
+            logDiv.innerHTML += `> ${text}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        // КРИТИЧЕСКИ ВАЖНО: Убиваем зависший Service Worker от прошлых попыток
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for(let registration of registrations) {
+                    registration.unregister();
+                    addLog("CLEARED stuck service worker from cache.");
+                }
+            });
+        }
+
+        const { FFmpeg } = FFmpegWASM;
+        const { fetchFile, toBlobURL } = FFmpegUtil;
+        const ffmpeg = new FFmpeg();
+        
+        const statusDiv = document.getElementById('status');
+        const renderBtn = document.getElementById('renderBtn');
+
+        // Выводим логи самого FFmpeg в окно
+        ffmpeg.on('log', ({ message }) => {
+            addLog(message);
+        });
+
+        async function load() {
+            try {
+                addLog("Connecting to CDN servers...");
+                const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+                
+                addLog("Downloading ffmpeg-core.js...");
+                const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript');
+                
+                addLog("Downloading ffmpeg-core.wasm (approx. 30MB) - Please wait...");
+                const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm');
+
+                addLog("Loading engine into browser memory...");
+                await ffmpeg.load({
+                    coreURL: coreURL,
+                    wasmURL: wasmURL
+                });
+                
+                addLog("SUCCESS: Engine is ready!");
+                renderBtn.disabled = false;
+                renderBtn.innerText = "Generate Video";
+            } catch (e) {
+                addLog(`CRITICAL ERROR: ${e.message}`);
+                statusDiv.innerText = "Failed to load FFmpeg. Check logs.";
+                statusDiv.style.color = "#ff4444";
+            }
+        }
+        
+        // Запускаем загрузку ядра
+        load();
+
+        renderBtn.addEventListener('click', async () => {
+            const fileInput = document.getElementById('imageInput').files[0];
+            if (!fileInput) {
+                alert('Please select an image first!');
+                return;
+            }
+
+            renderBtn.disabled = true;
+            document.getElementById('downloadLink').style.display = 'none';
+            statusDiv.innerText = "Preparing file...";
+            statusDiv.style.color = "#ffcc00";
+
+            const direction = document.getElementById('direction').value;
+            const duration = parseInt(document.getElementById('duration').value);
+            const fps = 30; 
+            
+            const speed = (1 / (duration * fps)).toFixed(6);
+            const scrollFilter = direction === 'horizontal' 
+                ? `scroll=h=${speed}:v=0` 
+                : `scroll=h=0:v=${speed}`;
+
+            // Прогресс рендера
+            ffmpeg.on('progress', ({ progress }) => {
+                const percent = Math.round(progress * 100);
+                statusDiv.innerText = `Rendering: ${Math.min(percent, 100)}%`;
+            });
+
+            addLog("Reading image file...");
+            const inputName = 'input.jpg';
+            await ffmpeg.writeFile(inputName, await fetchFile(fileInput));
+
+            addLog(`Applying Offset filter: ${scrollFilter}`);
+            addLog("Encoding to 10 Mbps H.264...");
+
+            try {
+                await ffmpeg.exec([
+                    '-loop', '1',
+                    '-i', inputName,
+                    '-vf', `${scrollFilter},format=yuv420p`,
+                    '-c:v', 'libx264',
+                    '-b:v', '10M',
+                    '-maxrate', '10M',
+                    '-bufsize', '20M',
+                    '-t', duration.toString(),
+                    '-r', fps.toString(),
+                    'output.mp4'
+                ]);
+
+                addLog("Render complete. Creating video file...");
+                const data = await ffmpeg.readFile('output.mp4');
+                const url = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+
+                const downloadLink = document.getElementById('downloadLink');
+                downloadLink.href = url;
+                downloadLink.download = `Offset_${direction}_${duration}sec.mp4`;
+                downloadLink.style.display = 'block';
+                
+                statusDiv.innerText = "Successfully generated!";
+                statusDiv.style.color = "#28a745";
+            } catch (err) {
+                addLog(`RENDER ERROR: ${err.message}`);
+                statusDiv.innerText = "Render failed.";
+                statusDiv.style.color = "#ff4444";
+            } finally {
+                renderBtn.disabled = false;
+                renderBtn.innerText = "Generate Another Video";
+            }
+        });
+    </script>
+</body>
+</html>
